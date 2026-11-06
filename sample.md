@@ -1,27 +1,35 @@
-PHASE 2b - ERROR DETAILS AND LAYERING (small follow-up to Phase 2)
-1. Structured validation errors:
-   - Add an optional `errors: list[dict] | None` to AppError (default None). Each item uses
-     FastAPI's shape: {"loc": [...], "msg": str, "type": str}.
-   - Add UnprocessableError(AppError) with status 422. Keep BadRequestError (400) for business
-     rules such as max_depth_exceeded.
-   - Update the error handler. The response stays {"detail", "code"} and adds "errors" only when
-     the list is present, so existing responses don't change.
-   - invalid_definition raises UnprocessableError with detail "Invalid <type> definition." and
-     errors converted from the Pydantic ValidationError (loc prefixed with "definition", e.g.
-     ["definition","conditions",0,"value"]).
-   - Update the Phase 2 tests to assert 422, the code, and at least one errors[].loc. Add a test
-     showing that an existing 400/404/409 response has no "errors" key.
-2. Layering fix:
-   - Move evaluator metadata (names, labels, descriptions, config Pydantic models, lookup
-     helpers) from app/services/evaluators/registry.py to app/core/evaluators.py, next to
-     app/core/eval_types.py.
-   - app/schemas/eval_definitions.py imports only from app/core.
-   - app/services/evaluators/ keeps only implementations (still NotImplementedError for now).
-     Implementations are looked up by evaluator name, and app/core never imports from services.
-   - Update the imports, the GET /api/v1/eval/evaluators route and the tests.
-3. Keep combine default "all" and surface_weight default 0.3. Document both defaults in the
-   schema docstrings and the JSON Schema descriptions.
-Run full pytest, show alembic heads (should be unchanged - no migration in this phase), list
-changed files, then STOP.
-Commit as "refactor(eval): structured validation errors and evaluator metadata in core".
+Phase 3 looks good. Both deviations are correct, and you can accept them.
 
+1. **`Uuid` instead of `String(36)`:** Copilot is right, and my standing rule was wrong for this codebase. A foreign key column must have the same type as the primary key it points to. Here those primary keys are `sa.Uuid`, which is `UNIQUEIDENTIFIER` on SQL Server, so `NVARCHAR(36)` would be rejected.
+2. **One migration instead of two:** fine. It's one phase, one additive revision, and it changes no data.
+
+The autoflush fix also improves things, because a bad `hierarchy_node_id` is now rejected before anything is written.
+
+Before you commit, ask Copilot one quick question. Skills live on the filesystem, so their bindings can't have a foreign key to anything.
+
+```text
+Quick check before commit, no new features:
+1. When binding a skill to a node, do we validate the skill exists in the Skill Fabric
+   (422 if not)? If not, add that check and a test.
+2. If a bound skill is later removed from the filesystem, what do GET /skill-fabric/{skill}/nodes
+   and the visible-skills calculation do? They should not error; orphaned bindings should be
+   ignored in visibility and reported (e.g. "skill_missing": true) in the nodes listing.
+   Add a test.
+3. Confirm skill bind/unbind and scope PUT are written to the audit log.
+Answer briefly, fix only what is missing, run pytest, then STOP.
+```
+
+Then commit as `feat(hierarchy): agent placement, skill bindings and user scopes`.
+
+**Before Phase 4**, replace the "Databases" line in the standing rules with this:
+
+```text
+- Databases: production Azure SQL (SQL Server), local SQLite acp_td.db. Portable types only.
+  IDs and foreign keys use the same type as the referenced primary key (sa.Uuid for
+  hierarchy_nodes, eval_categories, eval_subcategories and all new eval tables); String(n) for
+  natural keys with indexed strings <= 450 chars; Text, Integer, Float, Boolean,
+  DateTime(timezone=True), JSONType. No ON DELETE CASCADE and no cascade relationships (enforce
+  delete rules in services). No partial indexes or DB-specific defaults.
+```
+
+This matters in Phases 4 and 5, where `eval_checks.category_id`, `subcategory_id`, `eval_check_versions.check_id`, and `eval_assignments.node_id` and `check_id` must all be `Uuid`. Copilot would probably do this anyway, but with the rule in the standing rules it won't have to guess.
