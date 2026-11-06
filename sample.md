@@ -1,64 +1,40 @@
-Keeping the same revision ID for a **branch-only, never-deployed** migration is acceptable, and the chain stays linear. Two adjustments, though, before you run anything.
+Decisions on the frontend review (the backend API is the contract; presentation mapping is the
+frontend's job):
 
-## 1. Don't use the downgrade command it gave you. Recreate the local database instead
+A. Model/API changes to fold into the coming phases:
+1. Hierarchy code pattern: widen to ^[a-z][a-z0-9_-]{1,49}$ (hyphens allowed, path separator
+   stays "."); add a test.
+2. Weights and thresholds are fractions 0-1 in the API and DB (default_weight gt 0 le 1,
+   pass_threshold ge 0 le 1, normalized weights 0-1). Document this in docs/api and the schema
+   descriptions. UIs multiply by 100 for display.
+3. hard_gate stays boolean.
+4. Phase 5 adds GET /api/v1/eval/playbook/tree: active hierarchy nodes with {id, code, name,
+   level, level_label, children, resolved_count, direct_count}. The generic hierarchy tree
+   endpoint stays free of eval data.
+5. Hierarchy levels: still ONE root. L0 = Global (the organisation), L1 = Country (e.g. Canada,
+   US), L2 = Line of business (e.g. Banking, Insurance), L3 = Business function (e.g. Lending).
+   Update the level label constant to "Global", "Country", "Line of business",
+   "Business function". The team UI's template "scope" (Global/Canada/US) maps to the hierarchy
+   node a check is assigned to in the playbook; no separate jurisdiction field.
+6. Add tags: list[str] (JSONType, default []) to eval checks with a tag filter on the list
+   endpoint.
+7. Check responses include both id and key; add GET /api/v1/eval/checks/by-key/{key}.
+8. Check responses embed category {id, key, name} and subcategory {id, key, name} | null; list
+   filters accept category_id or category_key.
+9. Hierarchy node responses include level_label from the backend constant.
+10. Setup steps return a "target" key (hierarchy, eval_catalog.categories, eval_catalog.checks,
+    eval_playbook) instead of a URL path; frontend-local maps targets to its own routes. Update
+    existing steps and tests.
+11. Check responses include assignment_count; the playbook node response includes
+    stats {total, direct, inherited, hard_gates}.
 
-Copilot's `downgrade 3c01e38f4f19` will most likely **fail partway**. A downgrade runs each migration's `downgrade()` function, and migration `05ef25fc4478` now contains the **new** code: it drops `eval_subcategories` and `eval_categories` (new meaning). Your database still has the **old** tables (`eval_dimensions`, and `eval_categories` with the old meaning). So the rollback tries to drop `eval_subcategories`, which doesn't exist, and errors out, leaving the database half rolled back.
+B. Frontend: the team's React SPA (frontend/) is the real UI and will be integrated by the
+   teammate; do NOT modify frontend/. Keep building the interim pages in frontend-local as
+   planned in Phase 6, because we test with it. Additionally write docs/api/eval.md and
+   docs/api/hierarchy.md: every endpoint with request/response examples, field units
+   (fractions), error codes, and a mapping table from the team's mock types (TEvalTemplate,
+   TPlaybook, TPlaybookNode) to our responses, including the frontend-side mappings (percent
+   display, "Must pass" label for hard_gate, validated = status active, scope = assigned node).
 
-Since nothing is seeded and the local database only holds branch work, the clean option is a fresh database file. You'll lose locally entered data only: taxonomy, hierarchy and any locally registered agents, all of which take minutes to re-enter in the portal.
+Apply A.1, A.5, A.9 and A.10 now, run tests.
 
-## 2. Answer Copilot's cascade question: yes, fix it now
-
-Fold the cascade fix into the branch-only migration **before** you rebuild the database, so you only rebuild once. Paste this to Copilot:
-
-```text
-Yes, drop ondelete="CASCADE" on eval_subcategories.category_id now, in the same branch-only
-migration 05ef25fc4478 and in the model (deletion rules stay enforced in the service: a category
-can only be deleted when it is draft and has no subcategories, which already exists). While doing
-it, audit EVERY foreign key in all branch-only migrations and models (audit_logs, eval taxonomy,
-hierarchy_nodes) and remove any ondelete="CASCADE" or cascade="all, delete-orphan" relationship
-settings that would create cascade paths on SQL Server; list what you changed. Do not touch
-migrations that exist on origin/main. Run the full test suite afterwards, show `alembic heads` and
-`alembic history`, and stop.
-```
-
-## 3. Then rebuild the local database
-
-Run from `backend`, after Copilot finishes the step above:
-
-```powershell
-cd clu_agenticPlane\backend
-
-# 1. Confirm the chain: 3c01e38f4f19 must be the last revision that is also on main
-.\.venv\Scripts\alembic.exe heads
-.\.venv\Scripts\alembic.exe history
-
-# 2. Back up the old database, then remove it
-Copy-Item acp_td.db acp_td.db.bak
-Remove-Item acp_td.db
-
-# 3. Build a fresh database from all migrations
-.\.venv\Scripts\alembic.exe upgrade head
-.\.venv\Scripts\alembic.exe current
-
-# 4. Confirm the tables
-.\.venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('acp_td.db'); print([r[0] for r in c.execute(\"select name from sqlite_master where type='table' order by name\")])"
-
-# 5. Tests
-.\.venv\Scripts\python.exe -m pytest
-```
-
-**Expected:**
-
-- `heads` shows one head (`6695cce96994`).
-- `history` shows `3c01e38f4f19` (main) then `05ef25fc4478` then `6695cce96994`, plus the E0 audit migration in between if it's branch-only.
-- The table list includes `eval_categories`, `eval_subcategories` and `hierarchy_nodes`, plus the agent/skill tables from main's migrations. There should be **no** `eval_dimensions`.
-
-**Check before step 2:** in `alembic history`, make sure `3c01e38f4f19` is the revision Azure SQL is on (the `version_num` your teammate saw). If it isn't, stop and tell me what you see.
-
-## 4. Re-enter your data in the portal
-
-1. **Administration → Hierarchy:** Bank (L0), then Banking (L1), then Lending (L2). Activate top-down.
-2. **Eval Catalog → Categories:** Accuracy, Safety, Compliance, Experience, Operational with your weights, then activate.
-3. Re-register your reference agents if you had any locally.
-
-Once it all checks out, delete `acp_td.db.bak` 
